@@ -10,11 +10,18 @@ wrong when setting up the GitHub repo.
 
 from typing import Type
 
+import requests
+from bs4 import BeautifulSoup
 from crewai import Agent, Crew, LLM, Process, Task
 from crewai.tools import BaseTool
-from crewai_tools import ScrapeWebsiteTool
 from ddgs import DDGS
 from pydantic import BaseModel, Field
+
+# Maximum characters of profile text / scraped page text we send to the LLM.
+# Groq's free tier has a daily token budget, and raw scraped pages / long
+# profiles can burn through it fast, so we keep everything on a tight leash.
+MAX_PROFILE_CHARS = 4000
+MAX_SCRAPE_CHARS = 2000
 
 # --------------------------------------------------------------------------
 # Free, no-API-key web search tool (DuckDuckGo via the `ddgs` package).
@@ -76,6 +83,56 @@ class DuckDuckGoSearchTool(BaseTool):
 
 
 # --------------------------------------------------------------------------
+# Free, no-API-key page reading tool with a hard length cap (to save tokens).
+# We use a small custom tool instead of crewai_tools' ScrapeWebsiteTool
+# because that one returns the entire page text with no size limit, which
+# can burn through a lot of Groq's daily free-tier token budget.
+# --------------------------------------------------------------------------
+
+
+class ScrapePageInput(BaseModel):
+    """Input schema for LightScrapeTool."""
+
+    url: str = Field(..., description="The full URL of the web page to read.")
+
+
+class LightScrapeTool(BaseTool):
+    name: str = "Read Web Page"
+    description: str = (
+        "Fetches a web page and returns its main visible text (capped in "
+        "length to keep things efficient). Use this to confirm a job "
+        "posting is real and to read its details."
+    )
+    args_schema: Type[BaseModel] = ScrapePageInput
+
+    def _run(self, url: str) -> str:
+        try:
+            response = requests.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (JobFindingAIAgent/1.0)"},
+                timeout=10,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            return f"Could not fetch '{url}'. Error: {exc}"
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+
+        text = " ".join(soup.get_text(separator=" ").split())
+
+        if not text:
+            return f"No readable text found on '{url}'."
+
+        truncated = text[:MAX_SCRAPE_CHARS]
+        if len(text) > MAX_SCRAPE_CHARS:
+            truncated += " ... [truncated]"
+
+        return truncated
+
+
+# --------------------------------------------------------------------------
 # LLM setup — Groq's OpenAI-compatible endpoint.
 # We route through the "openai/" prefix (CrewAI's native OpenAI-compatible
 # code path) instead of "groq/" because, as of CrewAI 1.x, the LiteLLM-based
@@ -126,7 +183,7 @@ def build_job_search_crew(
     llm = get_groq_llm(groq_api_key)
 
     search_tool = DuckDuckGoSearchTool()
-    scrape_tool = ScrapeWebsiteTool()
+    scrape_tool = LightScrapeTool()
 
     job_search_agent = Agent(
         role="Senior Job Search Specialist",
@@ -158,9 +215,17 @@ def build_job_search_crew(
         # Hard safety caps so a confused agent can never spin forever:
         # stop after at most 8 tool-call rounds, or 3 minutes, whichever
         # comes first.
-        max_iter=8,
+        max_iter=6,
         max_execution_time=180,
     )
+
+    # Keep the profile short — LinkedIn PDF exports repeat a lot of
+    # boilerplate, and every extra character here gets re-sent to the LLM
+    # on every tool-call round, which adds up fast against Groq's daily
+    # token budget.
+    trimmed_profile = profile_text[:MAX_PROFILE_CHARS]
+    if len(profile_text) > MAX_PROFILE_CHARS:
+        trimmed_profile += "\n... [profile truncated for length]"
 
     if work_mode == "Remote":
         preference_text = "The candidate wants REMOTE jobs only (work from anywhere)."
@@ -174,7 +239,7 @@ You are helping a job seeker find real, currently available job openings.
 
 Here is the candidate's LinkedIn profile, extracted from their PDF export:
 ---
-{profile_text}
+{trimmed_profile}
 ---
 
 Preference: {preference_text}
