@@ -149,7 +149,17 @@ def build_job_search_crew(
         llm=llm,
         verbose=True,
         allow_delegation=False,
-        max_iter=15,
+        # Memory is OFF on purpose: CrewAI's default memory=True tries to
+        # create an embedder (defaults to OpenAI embeddings), which will
+        # hang/retry for a long time if you only have a GROQ_API_KEY set
+        # and no OPENAI_API_KEY. We don't need memory for a single-shot
+        # job search anyway.
+        memory=False,
+        # Hard safety caps so a confused agent can never spin forever:
+        # stop after at most 8 tool-call rounds, or 3 minutes, whichever
+        # comes first.
+        max_iter=8,
+        max_execution_time=180,
     )
 
     if work_mode == "Remote":
