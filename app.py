@@ -134,7 +134,22 @@ if run_clicked:
                 st.success("Done! Here are your matching jobs:")
                 st.markdown(str(result))
             except Exception as exc:
-                st.error(f"Something went wrong while running the agent: {exc}")
+                error_text = str(exc)
+                if "rate_limit_exceeded" in error_text or "429" in error_text:
+                    st.error(
+                        "🚦 Groq's free-tier daily token limit has been reached "
+                        "for this API key. This isn't a bug — it just means "
+                        "today's free quota for this model is used up.\n\n"
+                        "**What to do:**\n"
+                        "- Wait for the daily limit to reset (check the exact "
+                        "time at [console.groq.com/settings/limits]"
+                        "(https://console.groq.com/settings/limits)), or\n"
+                        "- Use a different Groq API key, or\n"
+                        "- Try a smaller/cheaper Groq model with a higher "
+                        "daily token budget."
+                    )
+                else:
+                    st.error(f"Something went wrong while running the agent: {exc}")
 
 st.divider()
 st.caption(
